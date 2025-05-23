@@ -253,6 +253,9 @@ class SequenceTier(Sequence, TierMixins, WithinMixins):
                 self.entry_class((this_end, next_start, ""))
             ]
 
+            for interval in self:
+                interval.cleanup()
+
         if self.within:
             self.within.re_relate()
 
@@ -369,17 +372,74 @@ class TierGroup(Sequence,TierGroupMixins, WithinMixins):
                 upper_ends = upper_tier.ends
                 lower_starts = lower_tier.starts
                 lower_ends = lower_tier.ends
-                
-                starts = np.searchsorted(lower_starts, upper_starts, side = "left")
-                ends = np.searchsorted(lower_ends, upper_ends, side = "right")
-                if not np.all(starts[1:] == ends[:-1]):
-                    warnings.warn("Some intervals on subset tier have no superset instance")
 
-                lower_sequences = [lower_tier[starts[idx]:ends[idx]] for idx,_ in enumerate(upper_tier)]
+                mins = np.minimum.outer(lower_ends, upper_ends)
+                maxes = np.maximum.outer(lower_starts, upper_starts)
+
+                lower_durations = (lower_ends - lower_starts)
+
+                overlaps = (mins-maxes)
+                
+                if overlaps.size < 1:
+                    continue
+                max_overlaps = overlaps.max(axis = 1)
+
+                upper_container = overlaps.argmax(axis = 1)
+                lower_idx = np.arange(len(lower_tier))
+
+                _starts = np.array([
+                    lower_idx[upper_container==idx].min()
+                    if (upper_container == idx).sum() > 0
+                    else -1
+                    for idx in range(len(upper_tier))
+                ])
+
+                _ends = np.array([
+                    lower_idx[upper_container==idx].max()+1
+                    if (upper_container == idx).sum() > 0
+                    else -1
+                    for idx in range(len(upper_tier))
+                ])
+
+                starts = np.ma.masked_array(_starts, _starts < 0)
+                ends = np.ma.masked_array(_ends, _ends < 0)
+                
+                mismatches = lower_durations - max_overlaps
+                any_mismatch = bool(np.any(mismatches > 0))
+
+                # any_mismatch = bool(np.any(start_match > 0))
+
+                if any_mismatch:
+                    mismatches = mismatches[mismatches>0]
+                    warnings.warn(
+                        f"There were {mismatches.size} boundaries "
+                        f"between a {upper_tier.entry_class.__name__} tier and "
+                        f"and a {lower_tier.entry_class.__name__} "
+                        "that didn't exactly match. "
+                        f"The largest mismatch was {float(mismatches.max()):.3f}s"
+                    )
+
+                lower_sequences = []
+                for idx, _ in enumerate(upper_tier):
+                    if np.ma.is_masked(starts[idx]):
+                        lower_sequences.append([])
+                    else:
+                        lower_sequences.append(
+                            lower_tier[starts[idx]:ends[idx]]
+                        )
                 
                 for u,l in zip(upper_tier, lower_sequences):
                     u.set_subset_list(l)
-                    u.validate()
+                    if not any_mismatch:
+                        continue
+
+                    s_start = np.array([u.start, u.first.start]).max()
+                    s_end = np.array([u.end, u.last.end]).min()
+
+                    u.start = s_start
+                    u.first.start = s_start
+                    u.end = s_end
+                    u.last.end = s_end
     
     def __getitem__(
             self,
@@ -491,19 +551,37 @@ class TierGroup(Sequence,TierGroupMixins, WithinMixins):
         This will fill any gaps between intervals with intervals
         with an empty label.
         """
-        for idx, tier in enumerate(self):
-            if issubclass(tier.subset_class, Bottom):
-                break
+        not_tight = False
+        
+        for tier in self:
+            starts = tier.starts
+            ends = tier.ends
 
-            for interval in tier:
-                interval.cleanup()
+            if not np.allclose(
+                starts[1:], ends[:-1]
+            ):
+                not_tight = True
+        
+        if not not_tight:
+            print(not_tight)
+            return
+        
+        for tier in self:
+            tier.cleanup()
+
+        # for idx, tier in enumerate(self):
+        #     if issubclass(tier.subset_class, Bottom):
+        #         break
+
+        #     for interval in tier:
+        #         interval.cleanup()
         
         for idx, tier in enumerate(reversed(self)):
             for interval in tier:
                 self._project_up(interval)
 
-        for tier in self:
-            tier.cleanup()
+        # for tier in self:
+        #     tier.cleanup()
         
         self.re_relate()
 
